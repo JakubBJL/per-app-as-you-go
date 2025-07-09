@@ -1,0 +1,188 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object",
+      "metadata": {
+        "description": "Managed Logic App API connections. Required for connectors to external services such as Microsoft Forms and Office 365."
+      }
+    },
+    "$authentication": {
+      "defaultValue": {},
+      "type": "SecureObject",
+      "metadata": {
+        "description": "Authentication details for API connections. Should be provided securely, such as from Azure Key Vault or secure parameters."
+      }
+    },
+    "AccessRequestFormId": {
+      "defaultValue": "{{FormId}}",
+      "type": "String",
+      "metadata": {
+        "description": "The ID of the Microsoft Form that users submit to request access. Replace {{FormId}} with the actual Form ID when deploying."
+      }
+    },
+    "UserRole1GroupId": {
+      "defaultValue": "{{UserRole1GroupId}}",
+      "type": "String",
+      "metadata": {
+        "description": "Azure AD Group ID for user-role1. Defines security permissions and access levels. Replace {{UserRole1GroupId}} with your actual group ID."
+      }
+    },
+    "UserRole2GroupId": {
+      "defaultValue": "{{UserRole2GroupId}}",
+      "type": "String",
+      "metadata": {
+        "description": "Azure AD Group ID for user-role2. Defines security permissions and access levels. Replace {{UserRole2GroupId}} with your actual group ID."
+      }
+    },
+    "AdminEmail": {
+      "defaultValue": "{{AdminEmail}}",
+      "type": "String",
+      "metadata": {
+        "description": "Email address for admin notifications. Must be a valid email address format (e.g., admin@example.com)."
+      }
+    }
+  },
+  "triggers": {
+    "When_a_new_response_is_submitted": {
+      "type": "OpenApiConnectionWebhook",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_microsoftforms"
+        },
+        "parameters": {
+          "form_id": "@parameters('AccessRequestFormId')"
+        },
+        "authentication": "@parameters('$authentication')"
+      },
+      "metadata": {
+        "description": "Triggered when a new response is submitted to the specified Microsoft Form (AccessRequestFormId)."
+      }
+    }
+  },
+  "actions": {
+    "Get_response_details": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_microsoftforms"
+        },
+        "parameters": {
+          "form_id": "@parameters('AccessRequestFormId')",
+          "response_id": "@triggerOutputs()?['body/resourceData/responseId']"
+        },
+        "authentication": "@parameters('$authentication')"
+      },
+      "runAfter": {},
+      "metadata": {
+        "description": "Retrieves full details of the form response using the response ID from the trigger."
+      }
+    },
+    "Get_Submitter_Email": {
+      "type": "Compose",
+      "inputs": "@outputs('Get_response_details')?['body/responder']",
+      "runAfter": {
+        "Get_response_details": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Extracts the submitter's email address from the form response."
+      }
+    },
+    "Get_User_ID": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_office365users"
+        },
+        "parameters": {
+          "id": "@outputs('Get_Submitter_Email')"
+        },
+        "authentication": "@parameters('$authentication')"
+      },
+      "runAfter": {
+        "Get_Submitter_Email": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Retrieves user details from Office 365 based on the submitter's email address."
+      }
+    },
+    "Get_Access_Token": {
+      "type": "Http",
+      "inputs": {
+        "method": "POST",
+        "uri": "https://login.microsoftonline.com/{{tenantId}}/oauth2/v2.0/token",
+        "body": {
+          "client_id": "{{clientId}}",
+          "scope": "https://graph.microsoft.com/.default",
+          "client_secret": "{{clientSecret}}",
+          "grant_type": "client_credentials"
+        },
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "runAfter": {
+        "Get_User_ID": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Obtains a Microsoft Graph access token using client credentials. Required for group membership checks and user management."
+      }
+    },
+    "Check_Membership": {
+      "type": "Http",
+      "inputs": {
+        "method": "GET",
+        "uri": "https://graph.microsoft.com/v1.0/groups/@{parameters('UserRole1GroupId')}/members",
+        "headers": {
+          "Authorization": "Bearer @{body('Get_Access_Token')?['access_token']}"
+        }
+      },
+      "runAfter": {
+        "Get_Access_Token": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Checks if the user is already a member of the specified group (UserRole1GroupId) using Microsoft Graph."
+      }
+    },
+    "Condition": {
+      "type": "If",
+      "expression": {
+        "not": [
+          {
+            "contains": [
+              "@body('Check_Membership')?['value']",
+              "@outputs('Get_User_ID')?['body/id']"
+            ]
+          }
+        ]
+      },
+      "actions": {
+        "Run_ChildFlow_AddUser": {
+          "type": "Workflow",
+          "inputs": {
+            "host": {
+              "workflowReferenceName": "{{ChildFlowAddUser}}"
+            },
+            "body": {
+              "userEmail": "@outputs('Get_User_ID')?['body/mail']",
+              "groupId": "@parameters('UserRole2GroupId')"
+            }
+          },
+          "runAfter": {},
+          "metadata": {
+            "description": "Calls a child Logic App (specified by ChildFlowAddUser) to add the user to the specified group."
+          }
+        },
+        "Send_Email_To_User": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "connectionName": "shared_office365"
+            },
+            "parameters": {
+              "emailMessage/To": "@outputs('Get_User_ID')?['body/mail']",
+              "emailMessage/Subject": "App Access Request Received",
+              "emailMessage/Body": "<p>Dear @{outputs('Get_User_ID')?['body/givenName']} @{outputs('Get_User_ID')?['body/surname']},<br><br>We have received your access request. Please allow appropriate time for processing.</p
+
