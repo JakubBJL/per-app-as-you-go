@@ -1,0 +1,108 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$authentication": {
+      "defaultValue": {},
+      "type": "SecureObject",
+      "metadata": {
+        "description": "Authentication details for API connections. Store securely."
+      }
+    },
+    "UserRole2GroupId": {
+      "defaultValue": "{{UserRole2GroupId}}",
+      "type": "String",
+      "metadata": {
+        "description": "Azure AD Group ID from which users will be removed monthly."
+      }
+    }
+  },
+  "triggers": {
+    "Recurrence": {
+      "type": "Recurrence",
+      "recurrence": {
+        "frequency": "Month",
+        "interval": 1,
+        "timeZone": "W. Europe Standard Time",
+        "startTime": "2025-07-28T22:15:00Z"
+      },
+      "metadata": {
+        "description": "Trigger this flow every month to clean up group membership."
+      }
+    }
+  },
+  "actions": {
+    "Get_Access_Token": {
+      "type": "Http",
+      "inputs": {
+        "method": "POST",
+        "uri": "https://login.microsoftonline.com/{{TenantId}}/oauth2/v2.0/token",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        "body": "client_id={{ClientId}}&scope=https://graph.microsoft.com/.default&client_secret={{ClientSecret}}&grant_type=client_credentials"
+      },
+      "metadata": {
+        "description": "Obtains a Microsoft Graph API access token."
+      }
+    },
+    "Check_Membership": {
+      "type": "Http",
+      "inputs": {
+        "method": "GET",
+        "uri": "https://graph.microsoft.com/v1.0/groups/@{parameters('UserRole2GroupId')}/members",
+        "headers": {
+          "Authorization": "Bearer @{body('Get_Access_Token')?['access_token']}"
+        }
+      },
+      "runAfter": {
+        "Get_Access_Token": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Retrieves all current members of the group."
+      }
+    },
+    "Select": {
+      "type": "Select",
+      "inputs": {
+        "from": "@body('Check_Membership')?['value']",
+        "select": {
+          "mail": "@item()['mail']"
+        }
+      },
+      "runAfter": {
+        "Check_Membership": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Selects user email addresses from group members."
+      }
+    },
+    "Apply_to_each": {
+      "type": "Foreach",
+      "foreach": "@body('Select')",
+      "actions": {
+        "Remove": {
+          "type": "Workflow",
+          "inputs": {
+            "host": {
+              "workflowReferenceName": "{{ChildFlowRemoveUser}}"
+            },
+            "body": {
+              "text": "@items('Apply_to_each')?['mail']",
+              "text_1": "@parameters('UserRole2GroupId')"
+            }
+          },
+          "metadata": {
+            "description": "Calls the child logic app to remove each user from the group."
+          }
+        }
+      },
+      "runAfter": {
+        "Select": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Loops over each group member to remove them monthly."
+      }
+    }
+  }
+}
