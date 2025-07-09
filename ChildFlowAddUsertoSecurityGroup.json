@@ -1,0 +1,170 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object",
+      "metadata": {
+        "description": "Managed API connections for Logic App connectors."
+      }
+    },
+    "$authentication": {
+      "defaultValue": {},
+      "type": "SecureObject",
+      "metadata": {
+        "description": "Authentication details for API connections. Store securely."
+      }
+    }
+  },
+  "triggers": {
+    "manual": {
+      "type": "Request",
+      "kind": "Button",
+      "inputs": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "title": "UPN",
+              "type": "string",
+              "description": "User Principal Name (email address) of the user to add."
+            },
+            "text_1": {
+              "title": "GroupId",
+              "type": "string",
+              "description": "Azure AD Group ID to add the user to."
+            }
+          },
+          "required": ["text", "text_1"]
+        }
+      },
+      "metadata": {
+        "description": "Manual trigger for adding a user to an Azure AD group."
+      }
+    }
+  },
+  "actions": {
+    "Search_for_users": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_office365users"
+        },
+        "parameters": {
+          "searchTerm": "@triggerBody()['text']",
+          "top": 1,
+          "isSearchTermRequired": true
+        },
+        "authentication": "@parameters('$authentication')"
+      },
+      "metadata": {
+        "description": "Searches for the user in Office 365 by UPN."
+      }
+    },
+    "Get_User_ID": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "host": {
+          "connectionName": "shared_office365users"
+        },
+        "parameters": {
+          "id": "@triggerBody()['text']"
+        },
+        "authentication": "@parameters('$authentication')"
+      },
+      "runAfter": {
+        "Search_for_users": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Retrieves the user's Azure AD object ID."
+      }
+    },
+    "Get_Access_Token": {
+      "type": "Http",
+      "inputs": {
+        "method": "POST",
+        "uri": "https://login.microsoftonline.com/{{TenantId}}/oauth2/v2.0/token",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        "body": "client_id={{ClientId}}&scope=https://graph.microsoft.com/.default&client_secret={{ClientSecret}}&grant_type=client_credentials"
+      },
+      "runAfter": {
+        "Get_User_ID": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Obtains a Microsoft Graph API access token."
+      }
+    },
+    "Check_Membership": {
+      "type": "Http",
+      "inputs": {
+        "method": "GET",
+        "uri": "https://graph.microsoft.com/v1.0/groups/@{triggerBody()['text_1']}/members",
+        "headers": {
+          "Authorization": "Bearer @{body('Get_Access_Token')?['access_token']}"
+        }
+      },
+      "runAfter": {
+        "Get_Access_Token": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Checks if the user is already a member of the target group."
+      }
+    },
+    "If_User_Already_Exists": {
+      "type": "Compose",
+      "inputs": "@contains(join(body('Check_Membership')?['value'], ''), body('Get_User_ID')?['id'])",
+      "runAfter": {
+        "Check_Membership": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Determines if the user is already a group member."
+      }
+    },
+    "Compose": {
+      "type": "Compose",
+      "inputs": "@json(concat('{ \"@odata.id\": \"https://graph.microsoft.com/v1.0/directoryObjects/', body('Get_User_ID')?['id'], '\" }'))",
+      "runAfter": {
+        "If_User_Already_Exists": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Builds the request body for adding the user to the group."
+      }
+    },
+    "Add_User_to_Security_Group": {
+      "type": "Http",
+      "inputs": {
+        "method": "POST",
+        "uri": "https://graph.microsoft.com/v1.0/groups/@{triggerBody()['text_1']}/members/$ref",
+        "headers": {
+          "Authorization": "Bearer @{body('Get_Access_Token')?['access_token']}",
+          "Content-Type": "application/json"
+        },
+        "body": "@outputs('Compose')"
+      },
+      "runAfter": {
+        "Compose": ["Succeeded"]
+      },
+      "condition": "@equals(outputs('If_User_Already_Exists'), false)",
+      "metadata": {
+        "description": "Adds the user to the group if not already a member."
+      }
+    },
+    "Respond_to_PowerApp": {
+      "type": "Response",
+      "kind": "PowerApp",
+      "inputs": {
+        "statusCode": 200,
+        "body": {}
+      },
+      "runAfter": {
+        "If_User_Already_Exists": ["Succeeded"]
+      },
+      "metadata": {
+        "description": "Returns a response to the calling PowerApp."
+      }
+    }
+  }
+}
